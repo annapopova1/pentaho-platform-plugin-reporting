@@ -357,7 +357,7 @@ define(['common-ui/util/util', 'common-ui/util/formatting', 'pentaho/common/Mess
           messageBox.setButtons([]);
         } else {
           var closeFunc = function() {
-            Dashboards.hideProgressIndicator();
+            //Dashboards.hideProgressIndicator();
             messageBox.hide.call(messageBox);
           }
 
@@ -383,7 +383,7 @@ define(['common-ui/util/util', 'common-ui/util/formatting', 'pentaho/common/Mess
             messageBox.setButtons([button1Text]);
           }
         }
-        Dashboards.showProgressIndicator();
+        //Dashboards.showProgressIndicator();
         messageBox.show();
       },
 
