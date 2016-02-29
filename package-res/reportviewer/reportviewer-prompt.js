@@ -15,11 +15,14 @@
 * Copyright (c) 2002-2016 Pentaho Corporation..  All rights reserved.
 */
 
-define(['common-ui/util/util', 'pentaho/common/Messages', "dijit/registry", 'common-ui/prompting/parameters/ParameterXmlParser', 'common-ui/prompting/PromptPanel'],
+define(['common-ui/util/util', 'pentaho/common/Messages', "dijit/registry", "common-ui/prompting/api/PromptingAPI"],
 
-    function(util, Messages, registry, ParameterXmlParser, PromptPanel) {
+    function(util, Messages, registry, PromptingAPI) {
   return function() {
     return logged({
+
+      api: new PromptingAPI('promptPanel'),
+
       // The current prompt mode
       mode: 'INITIAL',
 
@@ -30,52 +33,62 @@ define(['common-ui/util/util', 'pentaho/common/Messages', "dijit/registry", 'com
       /**
        * Create the prompt panel
        */
-      createPromptPanel: function() {
-        // Obtain initial parameter definition and
-        // only then create the PromptPanel
-        this.fetchParameterDefinition(
-          /*promptPanel*/null,
-          this._createPromptPanelFetchCallback.bind(this),
-          /*promptMode*/'INITIAL');
+      createPromptPanel: function(viewerUpdateCallback) {
+        var initFlag = true;
+        this.api.operation.render(function(api, callback) {
+          var paramDefnCallback = function(xml) {
+            var paramDefn = this.parseParameterDefinition(xml);
+            // A first request is made,
+            // With promptMode='INITIAL' and renderMode='PARAMETER'.
+            //
+            // The response will not have page count information (pagination was not performed),
+            // but simply information about the prompt parameters (newParamDef).
+            //
+            // When newParamDefn.allowAutoSubmit() is true,
+            // And no validation errors/required parameters exist to be specified, TODO: Don't think that this is being checked here!
+            // Then a second request is made,
+            // With promptMode='MANUAL' and renderMode='XML' is performed.
+            //
+            // When the response to the second request arrives,
+            // Then the prompt panel is rendered, including with page count information,
+            // And  the report content is loaded and shown.
+            //
+            // [PIR-1163] Used 'inSchedulerDialog' variable to make sure that the second request is not sent if it's scheduler dialog.
+            // Because the scheduler needs only parameters without full XML.
+            if(!inSchedulerDialog && this.mode === 'INITIAL' && paramDefn.allowAutoSubmit()) {
+              this.mode = 'MANUAL';
+              this.fetchParameterDefinition(paramDefnCallback.bind(this));
+              return;
+            }
+
+            try {
+              var autoSubmit = this.api.operation.state().autoSubmit;
+              if(autoSubmit != null) {
+                paramDefn.autoSubmitUI = autoSubmit;
+              }
+            } catch(e) {
+              // ignore
+            }
+            callback(paramDefn);
+
+            this._hideLoadingIndicator();
+            if (initFlag) {
+              this.initPromptPanel();
+              initFlag = false;
+            } else {
+              viewerUpdateCallback();
+            }
+            this.hideGlassPane();
+          };
+          this.fetchParameterDefinition(paramDefnCallback.bind(this));
+        }.bind(this));
       },
 
       _createPromptPanelFetchCallback: function(paramDefn) {
-        var panel = this.panel = new PromptPanel('promptPanel', paramDefn);
-
-        panel.submit = this.submit.bind(this);
-        panel.submitStart = this.submitStart.bind(this);
-        panel.ready = this.ready.bind(this);
-
-        // User changes the value of a parameter:
-        //
-        // PromptingComponent:postChange ->
-        //    PromptPanel.parameterChanged -> .refreshPrompt -> .getParameterDefinition ->
-        //      (x) We Are Here
-        //      Prompt.fetchParameterDefinition ->
-        //        (callback)
-        //        PromptPanel.refresh -> .init ->
-        //           Dashboards.init ->
-        //
-        //  (...a few setTimeouts later...)
-        //
-        //  SubmitPromptComponent.update ->
-        //    PromptPanel._submit -> (When auto Submit)
-        //               .submit  ->
-        //       ReportViewer.submitReport
-        //
-        //  ScrollingPromptPanelLayoutComponent.postExecute ->
-        //    PromptPanel._ready ->
-        //
-        panel.getParameterDefinition = function(promptPanel, callback) {
-          // promptPanel === panel
-          this.fetchParameterDefinition(promptPanel, callback, /*promptMode*/'USERINPUT');
-        }.bind(this);
-
         // Provide our own i18n function
-        panel.getString = Messages.getString;
+        //panel.getString = Messages.getString;
 
         this.initPromptPanel();
-
         this._hideLoadingIndicator();
       },
 
@@ -90,7 +103,7 @@ define(['common-ui/util/util', 'pentaho/common/Messages', "dijit/registry", 'com
       },
 
       initPromptPanel: function() {
-        this.panel.init();
+        this.api.operation.init();
       },
 
       showGlassPane: function() {
@@ -102,29 +115,9 @@ define(['common-ui/util/util', 'pentaho/common/Messages', "dijit/registry", 'com
         registry.byId('glassPane').hide();
       },
 
-      ready: function(promptPanel) {
-        this.hideGlassPane();
-      },
-
-      /**
-       * Called by the prompt-panel component when the CDE components have been updated.
-       */
-      submit: function(promptPanel, options) {
-        alert('submit fired for panel: ' + promptPanel);
-      },
-
-      /**
-       * Called when the prompt-panel component's submit button is pressed (mouse-down only).
-       */
-      submitStart: function(promptPanel) {
-        alert('submit start fired for panel: ' + promptPanel);
-      },
-
-      parameterParser: new ParameterXmlParser(),
-
       parseParameterDefinition: function(xmlString) {
         xmlString = this.removeControlCharacters(xmlString);
-        return this.parameterParser.parseParameterXml(xmlString);
+        return this.api.util.parseParameterXml(xmlString);
       },
 
       /**
@@ -169,6 +162,7 @@ define(['common-ui/util/util', 'pentaho/common/Messages', "dijit/registry", 'com
        */
       handleSessionTimeout: function(args) {
         var callback = function() {
+          //TODO check
           this.fetchParameterDefinition.apply(this, args);
         }.bind(this);
 
@@ -211,7 +205,6 @@ define(['common-ui/util/util', 'pentaho/common/Messages', "dijit/registry", 'com
 
       /**
        * Loads the parameter xml definition from the server.
-       * @param promptPanel panel to fetch parameter definition for
        * @param {function} callback function to call when successful.
        * The callback signature is:
        * <pre>void function(newParamDef)</pre>
@@ -223,45 +216,30 @@ define(['common-ui/util/util', 'pentaho/common/Messages', "dijit/registry", 'com
        *
        * If not provided, 'MANUAL' will be used.
        */
-      fetchParameterDefinition: function(promptPanel, callback, promptMode) {
+      fetchParameterDefinition: function(callback) {
         var me = this;
 
         var fetchParamDefId = ++me._fetchParamDefId;
 
         me.showGlassPane();
 
-        if(!promptMode) {
-          promptMode = 'MANUAL';
-        }
-        else if (promptMode == 'USERINPUT') {
+        if (!me.mode) {
+          me.mode = 'MANUAL';
+        } else if (me.mode == 'USERINPUT') {
           // Hide glass pane to prevent user from being blocked from changing his selection
           me.hideGlassPane();
         }
 
-        if(me.clicking) {
-          // If "Upgrading" a Change to a Submit we do not want to process the next Submit Click, if any
-          var upgrade = (promptMode === 'USERINPUT');
-
-          me.ignoreNextClickSubmit = upgrade;
-
-          // Also, force the Change to behave as if AutoSubmit was on!
-          if(promptPanel) { promptPanel.forceAutoSubmit = upgrade; }
-
-          delete me.clicking;
-        }
-
-        // Store mode so we can check if we need to refresh the report content or not in the view
-        // As only the last request's response is processed, the last value of mode is actually the correct one.
-        me.mode = promptMode;
-
         // -------------
         var options = util.getUrlParameters();
 
-        // If we aren't passed a prompt panel this is the first request
-        if(promptPanel) {
-          $.extend(options, promptPanel.getParameterValues());
+        // If we aren't defined a parameter definition this is the first request
+        try {
+          $.extend(options, me.api.operation.getParameterValues());
+        } catch(e) {
+          // ignore
         }
-        options['renderMode'] = this._getParameterDefinitionRenderMode(promptPanel, promptMode);
+        options['renderMode'] = me._getParameterDefinitionRenderMode(me.mode);
 
         // Never send the session back. This is generated by the server.
         delete options['::session'];
@@ -276,39 +254,7 @@ define(['common-ui/util/util', 'pentaho/common/Messages', "dijit/registry", 'com
           if(fetchParamDefId !== me._fetchParamDefId) { return; }
 
           try {
-            var newParamDefn = me.parseParameterDefinition(xmlString);
-
-            // A first request is made,
-            // With promptMode='INITIAL' and renderMode='PARAMETER'.
-            //
-            // The response will not have page count information (pagination was not performed),
-            // but simply information about the prompt parameters (newParamDef).
-            //
-            // When newParamDefn.allowAutoSubmit() is true,
-            // And no validation errors/required parameters exist to be specified, TODO: Don't think that this is being checked here!
-            // Then a second request is made,
-            // With promptMode='MANUAL' and renderMode='XML' is performed.
-            //
-            // When the response to the second request arrives,
-            // Then the prompt panel is rendered, including with page count information,
-            // And  the report content is loaded and shown.
-            //
-            // [PIR-1163] Used 'inSchedulerDialog' variable to make sure that the second request is not sent if it's scheduler dialog.
-            // Because the scheduler needs only parameters without full XML.
-            if(!inSchedulerDialog && promptMode === 'INITIAL' && newParamDefn.allowAutoSubmit()) {
-              // assert promptPanel == null
-              me.fetchParameterDefinition(/*promptPanel*/null, callback, /*promptMode*/'MANUAL');
-              return;
-            }
-
-            // Make sure we retain the current auto-submit setting
-            //  pp.getAutoSubmitSetting -> pp.autoSubmit, which is updated by the check-box
-            var autoSubmit = promptPanel && promptPanel.getAutoSubmitSetting();
-            if(autoSubmit != null) {
-              newParamDefn.autoSubmitUI = autoSubmit;
-            }
-
-            callback.call(me, newParamDefn);
+            callback(xmlString);
           } catch (e) {
             me.onFatalError(e);
           }
@@ -333,13 +279,13 @@ define(['common-ui/util/util', 'pentaho/common/Messages', "dijit/registry", 'com
         });
       },
 
-      _getParameterDefinitionRenderMode: function(promptPanel, promptMode) {
+      _getParameterDefinitionRenderMode: function(promptMode) {
         switch(promptMode) {
           case 'INITIAL':
               return 'PARAMETER';
 
           case 'USERINPUT':
-            if (!promptPanel || !promptPanel.getAutoSubmitSetting()) {
+            if (!this.api.operation.state().autoSubmit) {
               return 'PARAMETER';
             }
             break;
@@ -362,9 +308,7 @@ define(['common-ui/util/util', 'pentaho/common/Messages', "dijit/registry", 'com
           messageBox.setButtons([]);
         } else {
           var closeFunc = function() {
-            if (this.panel) {
-              this.panel.dashboard.hideProgressIndicator();
-            }
+            this.api.ui.hideProgressIndicator();
             messageBox.hide.call(messageBox);
           }
 
@@ -390,9 +334,7 @@ define(['common-ui/util/util', 'pentaho/common/Messages', "dijit/registry", 'com
             messageBox.setButtons([button1Text]);
           }
         }
-        if (this.panel) {
-          this.panel.dashboard.showProgressIndicator();
-        }
+        this.api.ui.showProgressIndicator();
         messageBox.show();
       },
 

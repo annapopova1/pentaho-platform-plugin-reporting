@@ -73,15 +73,13 @@ define([ 'common-ui/util/util','reportviewer/reportviewer-prompt', 'common-ui/ut
           on(dom.byId('reportContent'),  "load", lang.hitch( onFrameLoaded));
         }
 
-        var basePromptReady   = this.prompt.ready.bind(this.prompt);
         var baseShowGlassPane = this.prompt.showGlassPane.bind(this.prompt);
         var baseHideGlassPane = this.prompt.hideGlassPane.bind(this.prompt);
 
-        this.prompt.ready         = this.view.promptReady  .bind(this.view,  basePromptReady);
+        this.prompt.api.event.ready(this.view.promptReady.bind(this.view));
         this.prompt.showGlassPane = this.view.showGlassPane.bind(this.view,  baseShowGlassPane);
         this.prompt.hideGlassPane = this.view.hideGlassPane.bind(this.view,  baseHideGlassPane);
-        this.prompt.submit        = this.submitReport.bind(this);
-        this.prompt.submitStart   = this.submitReportStart.bind(this);
+        this.prompt.api.event.submit(this.submitReport.bind(this));
 
         $('body')
           .addClass(_isTopReportViewer ? 'topViewer leafViewer' : 'leafViewer')
@@ -89,25 +87,11 @@ define([ 'common-ui/util/util','reportviewer/reportviewer-prompt', 'common-ui/ut
 
         logger && $('body').addClass('debug');
 
-        // The following is *not* confusing at all :-/
-
-        // Default implementation of this.prompt.initPromptPanel
-        // calls this.prompt.panel.init();
-        var decorated = this.prompt.initPromptPanel.bind(this.prompt);
-
-        this.prompt.initPromptPanel = logged('prompt.initPromptPanel', function() {
-          // Decorate the original init to first initialize our view then the panel
-          var panel = this.prompt.panel;
-          var init  = panel.init;
-
-          panel.init = function(noAutoAutoSubmit) {
-            this.view.initPrompt(init, this.prompt.panel, noAutoAutoSubmit);
-          }.bind(this);
-
-          decorated();
+        this.prompt.api.event.postInit(function() {
+          this.view.initPrompt();
         }.bind(this));
 
-        this.prompt.createPromptPanel();
+        this.prompt.createPromptPanel(this._updateReportContent.bind(this));
       },
 
       view: logged({
@@ -164,26 +148,25 @@ define([ 'common-ui/util/util','reportviewer/reportviewer-prompt', 'common-ui/ut
           }
         },
 
-        _calcReportContentVisibility: function(promptPanel) {
+        _calcReportContentVisibility: function() {
           var visible =
             // Anything in the iframe to show? (PRD-4271)
             this._hasReportContent() &&
 
             // Valid data (although report content should be blank here)
-            !promptPanel.paramDefn.promptNeeded &&
+            !v.prompt.api.operation.state().promptNeeded &&
 
             // Hide the report area when in the "New Schedule" dialog
             !inSchedulerDialog &&
 
-            (this._isAutoSubmitAllowed(promptPanel) ||
+            (this._isAutoSubmitAllowed() ||
             prompt.mode === 'MANUAL');
 
           return visible;
         },
 
-        _isAutoSubmitAllowed : function(promptPanel) {
-          if(promptPanel.forceAutoSubmit ||
-             promptPanel.paramDefn.allowAutoSubmit()) { // (BISERVER-6915)
+        _isAutoSubmitAllowed : function() {
+          if(v.prompt.api.operation.state().allowAutoSubmit) { // (BISERVER-6915)
             return true;
           }
 
@@ -205,35 +188,19 @@ define([ 'common-ui/util/util','reportviewer/reportviewer-prompt', 'common-ui/ut
           return !$('body').hasClass('contentHidden');
         },
 
-        // Called on page load and every time the prompt panel is refreshed
-        //  PromptingComponent.postChange ->
-        //  PromptPanel.parameterChanged ->
-        //             .refreshPrompt ->
-        //             .getParameterDefinition ->
-        //             .refresh ->
-        //             .init ->
-        initPrompt: function(basePanelInit, promptPanel, noAutoAutoSubmit) {
-          if (!promptPanel.paramDefn.showParameterUI()) {
+        initPrompt: function() {
+          if (!v.prompt.api.operation.state().showParameterUI) {
             this._hideToolbarPromptControls();
           }
 
           // The following call is important for clearing
           // the report content when autoSubmit=false and
           // the user has changed a value (prompt.mode === 'USERINPUT').
-          if(!this._calcReportContentVisibility(promptPanel)) {
+          if(!this._calcReportContentVisibility()) {
             this._showReportContent(false);
           }
 
-          // NOTE: `basePanelInit` may call submit, in which case submitReport
-          // is called without _initLayout having been called...
-          // (depends on whether there's a submit button or not).
-          // Because of that, `submitReport` calls _initLayout also,
-          // to make sure it has ran at least once.
-          // Reset layout inited flag.
-          // Note also that initLayout cannot be executed before init.
-          this._layoutInited = false;
-          basePanelInit.call(promptPanel, noAutoAutoSubmit);
-          this._initLayout(promptPanel);
+          this._initLayout();
 
           $.widget( "ui.autocomplete", $.ui.autocomplete, {
             _renderItem: function( ul, item) {
@@ -281,9 +248,8 @@ define([ 'common-ui/util/util','reportviewer/reportviewer-prompt', 'common-ui/ut
         },
 
         // Called by PromptPanel#postExecution (soon after initPrompt)
-        promptReady: function(basePromptReady, promptPanel) {
-
-          basePromptReady(promptPanel); // hides the glass pane...
+        promptReady: function() {
+          v.prompt.hideGlassPane();
 
           if (inSchedulerDialog) {
             // If we are rendering parameters for the "New Schedule" dialog,
@@ -304,7 +270,7 @@ define([ 'common-ui/util/util','reportviewer/reportviewer-prompt', 'common-ui/ut
             domClass.remove('reportControlPanel', 'pentaho-rounded-panel-bottom-lr');
 
             if (typeof window.parameterValidityCallback !== 'undefined') {
-              var isValid = !promptPanel.paramDefn.promptNeeded;
+              var isValid = !this.prompt.api.operation.state().promptNeeded;
               window.parameterValidityCallback(isValid);
             }
           }
@@ -312,25 +278,21 @@ define([ 'common-ui/util/util','reportviewer/reportviewer-prompt', 'common-ui/ut
 
         /**
          * Initializes the report viewer's layout based on the loaded parameter definition.
-         *
-         * @param promptPanel A prompt panel whose settings should be used to configure the report viewer
          */
-        _initLayout: function(promptPanel) {
-          if(this._layoutInited) { return; } // reset on every navigation (see #init)
-
+        _initLayout: function() {
           // Is it the first time, or is the parameter UI
           // being refreshed due to user interaction (which causes "navigation")?
           var navigating  = !!this._initedOnce;
           this._initedOnce = true;
 
-          var showParamUI = promptPanel.paramDefn.showParameterUI();
+          var showParamUI = v.prompt.api.operation.state().showParameterUI;
 
-          this.updatePageControl(promptPanel);
+          this.updatePageControl();
 
           // Hide the toolbar, 'toppanel',  when it would be empty and
           // un-style the report so it's the only visible element
           // when both the pagination controls and the parameter UI are hidden.
-          var isToolbarEmpty = !promptPanel.paramDefn.paginate && !showParamUI;
+          var isToolbarEmpty = !v.prompt.api.operation.state().paginate && !showParamUI;
           domClass[isToolbarEmpty ? 'add' : 'remove']('toppanel', 'hidden');
 
           // Don't mess with the parameters if we're "navigating".
@@ -346,8 +308,8 @@ define([ 'common-ui/util/util','reportviewer/reportviewer-prompt', 'common-ui/ut
             // Shown or hidden by default?
             // Don't show parameter panel by default unless prompt needed
             showOrHide = (!inMobile && _isTopReportViewer)  ||
-                         promptPanel.paramDefn.promptNeeded ||
-                         !promptPanel.paramDefn.allowAutoSubmit();
+                         v.prompt.api.operation.state().promptNeeded ||
+                         !v.prompt.api.operation.state().allowAutoSubmit;
           }
 
           var parameters = util.getUrlParameters();
@@ -371,50 +333,49 @@ define([ 'common-ui/util/util','reportviewer/reportviewer-prompt', 'common-ui/ut
          *
          * @method
          * @private
-         * @param {PromptPanel} promptPanel The prompt panel instance
          * @returns {Parameter} The 'accepted-page' parameter, see 'common-ui/parameters/Parameter'
          * @throws {String} Exception if 'accepted-page' parameter is null or not an object
          */
-        _getAcceptedPage: function(promptPanel) {
-          var acceptedPage = promptPanel.paramDefn.getParameter('accepted-page');
-          if(acceptedPage != null && typeof acceptedPage === 'object') {
+        _getAcceptedPage: function() {
+          var acceptedPage = v.prompt.api.operation.state().page;
+          if(acceptedPage != null && typeof acceptedPage === 'number') {
             return acceptedPage;
           }
           throw 'accepted-page is not a proper parameter - ' + acceptedPage;
         },
 
-        updatePageControl: function(promptPanel) {
+        updatePageControl: function() {
           var pc = registry.byId('pageControl');
 
           pc.registerPageNumberChangeCallback(undefined);
 
-          if (!promptPanel.paramDefn.paginate) {
-            promptPanel.setParameterValue(this._getAcceptedPage(promptPanel), '-1');
+          if (!v.prompt.api.operation.state().paginate) {
+            v.prompt.api.operation.setParameterValue('accepted-page', '-1');
             pc.setPageCount(1);
             pc.setPageNumber(1);
             // pc.disable();
           } else {
-            var total = promptPanel.paramDefn.totalPages;
-            var page = promptPanel.paramDefn.page;
+            var total = v.prompt.api.operation.state().totalPages;
+            var page = v.prompt.api.operation.state().page;
             // We can't accept pages out of range. This can happen if we are on a page and then change a parameter value
             // resulting in a new report with less pages. When this happens we'll just reduce the accepted page.
             page = Math.max(0, Math.min(page, total - 1));
 
             // add our default page, so we can keep this between selections of other parameters, otherwise it will not be on the
             // set of params are default back to zero (page 1)
-            promptPanel.setParameterValue(this._getAcceptedPage(promptPanel), '' + page);
+            v.prompt.api.operation.setParameterValue('accepted-page', '' + page);
             pc.setPageCount(total);
             pc.setPageNumber(page + 1);
           }
 
           pc.registerPageNumberChangeCallback(function(pageNumber) {
-            this.pageChanged(promptPanel, pageNumber);
+            this.pageChanged(pageNumber);
           }.bind(this));
         },
 
-        pageChanged: function(promptPanel, pageNumber) {
-          promptPanel.setParameterValue(this._getAcceptedPage(promptPanel), '' + (pageNumber - 1));
-          promptPanel.submit(promptPanel, {isPageChange: true});
+        pageChanged: function(pageNumber) {
+          v.prompt.api.operation.setParameterValue('accepted-page', '' + (pageNumber - 1));
+          v.prompt.api.operation.submit({isPageChange: true});
         },
 
         togglePromptPanel: function() {
@@ -424,7 +385,6 @@ define([ 'common-ui/util/util','reportviewer/reportviewer-prompt', 'common-ui/ut
 
         showPromptPanel: function(visible) {
           registry.byId('toolbar-parameterToggle').set('checked', !!visible);
-
           domClass[visible ? 'remove' : 'add']('reportControlPanel', 'hidden');
         },
 
@@ -578,7 +538,7 @@ define([ 'common-ui/util/util','reportviewer/reportviewer-prompt', 'common-ui/ut
         }
       }), // end view
 
-      createRequiredHooks: function(promptPanel) {
+      createRequiredHooks: function() {
         // [PIR-543] - Allow new/refreshed reports to re-attach or override instance functions in the top window object
         // Top window functions may become orphaned due to content linking refresh or when a report tab in PUC is closed
         /*
@@ -649,33 +609,12 @@ define([ 'common-ui/util/util','reportviewer/reportviewer-prompt', 'common-ui/ut
         this.view.resize();
       },
 
-      submitReportStart: function() {
-        // Submit button was mouse-downed!
-
-        // In case that a focusout already issued a "fetchParameterDefinition", and a response is to be received,
-        // we upgrade that request to behave like if a button had been clicked, by setting prompt.mode to 'MANUAL'.
-        // This way, if the user takes longer to release the mouse button,
-        // than the focusout response takes to replace the being clicked button by another one (Dashboards.init recreates everything),
-        // causing the click event no be generated,
-        // the focusout response processing will behave as if it were the response of a click.
-        //
-        // Because Dashboards.processChange ends up calling postChange in a setTimeout...
-        // this call actually gets executed **before** the logic fired by the focusout path,
-        // and fetchParameterDefinition has not been called yet.
-        this.prompt.clicking = true;
-      },
-
       // Called by SubmitPromptComponent#expression (the submit button's click)
       // Also may be called by PromptPanel#init, when there is no submit button (independently of autoSubmit?).
       submitReport: function(promptPanel, keyArgs) {
+        this.prompt.clicking = true;
         var isInit = keyArgs && keyArgs.isInit;
         if(!isInit) {
-          if(this.prompt.ignoreNextClickSubmit) {
-            delete this.prompt.ignoreNextClickSubmit;
-            logger && logger.log("Ignored submit click");
-            return;
-          }
-
           this.prompt.mode = 'MANUAL';
         }
 
@@ -683,28 +622,28 @@ define([ 'common-ui/util/util','reportviewer/reportviewer-prompt', 'common-ui/ut
           // If we are rendering parameters for the "New Schedule" dialog,
           // don't show the report, the submit panel and pages toolbar.
           if (inSchedulerDialog) {
-            this._submitReportEnded(promptPanel);
+            this._submitReportEnded();
             return;
           }
 
-          // Make sure that layout is initialized
-          this.view._initLayout(promptPanel);
-
           // Don't do anything if we need to prompt
-          var isValid = !promptPanel.paramDefn.promptNeeded;
+          var isValid = !this.prompt.api.operation.state().promptNeeded;
           if (!isValid) {
             logger && logger.log("Prompt is needed. Will clear htmlObject.data-src");
 
             $('#' + this.htmlObject).attr('data-src', 'about:blank'); // TODO: why htmlObject? Why not this._showReportContent(false)?
 
-            this._submitReportEnded(promptPanel);
+            this._submitReportEnded();
             return;
           }
 
-          this._updateReportContent(promptPanel, keyArgs);
-
+          if (!this.prompt.api.operation.state().autoSubmit) {
+            this.prompt.api.operation.refreshPrompt();
+          } else {
+            this._updateReportContent();
+          }
         } catch(ex) {
-          this._submitReportEnded(promptPanel);
+          this._submitReportEnded();
           throw ex;
         }
       },
@@ -716,35 +655,21 @@ define([ 'common-ui/util/util','reportviewer/reportviewer-prompt', 'common-ui/ut
         return this._updateReportTimeout >= 0;
       },
 
-      _updateReportContent: function(promptPanel, keyArgs) {
+      _updateReportContent: function() {
         var me = this;
+        me.view._initLayout();
 
-        // When !AutoSubmit, a renderMode=XML call has not been done yet,
-        //  and must be done now so that the page controls have enough info.
-        if(!promptPanel.getAutoSubmitSetting()) {
-          // FETCH page-count info before rendering report
-          var callback = logged("_updateReportContent_fetchParameterCallback", function(newParamDefn) {
-
-            delete promptPanel.forceAutoSubmit;
-
-            // Recreates the prompt panel's CDF components
-            promptPanel.refresh(newParamDefn, /*noAutoAutoSubmit*/true);
-
-            me._updateReportContentCore(promptPanel, keyArgs);
-          });
-
-          me.prompt.fetchParameterDefinition(promptPanel, callback, /*promptMode*/'MANUAL');
-        } else {
-          me._updateReportContentCore(promptPanel, keyArgs);
+        if (me.prompt.clicking || me.prompt.api.operation.state().autoSubmit) {
+          me._updateReportContentCore();
         }
       },
 
-      _updateReportContentCore: function(promptPanel, keyArgs) {
+      _updateReportContentCore: function() {
         var me = this;
 
         // PRD-3962 - remove glass pane after 5 seconds in case iframe onload/onreadystatechange was not detected
         me._updateReportTimeout = setTimeout(logged('updateReportTimeout', function() {
-          me._submitReportEnded(promptPanel, /*isTimeout*/true);
+          me._submitReportEnded(true);
         }), 5000);
 
         // PRD-3962 - show glass pane on submit, hide when iframe is loaded.
@@ -752,7 +677,7 @@ define([ 'common-ui/util/util','reportviewer/reportviewer-prompt', 'common-ui/ut
         // that the report content is being updated.
         me.prompt.showGlassPane();
 
-        var options = me._buildReportContentOptions(promptPanel);
+        var options = me._buildReportContentOptions();
         var url = me._buildReportContentUrl(options);
         var outputFormat = options['output-target'];
         var isHtml = outputFormat.indexOf('html') != -1;
@@ -790,7 +715,7 @@ define([ 'common-ui/util/util','reportviewer/reportviewer-prompt', 'common-ui/ut
           me._isHtmlReport = me.view._isHtmlReport = isHtml;
           me._outputFormat = outputFormat;
 
-          var visible = me.view._calcReportContentVisibility(promptPanel);
+          var visible = me.view._calcReportContentVisibility();
           if(visible) {
             // A child viewer forces changing to non-styled
             me.view.setPageStyled(styled && !this._isParentViewer);
@@ -799,15 +724,15 @@ define([ 'common-ui/util/util','reportviewer/reportviewer-prompt', 'common-ui/ut
 
           me.view._showReportContent(visible);
 
-          me._submitReportEnded(promptPanel);
+          me._submitReportEnded();
         });
       },
 
-      _submitReportEnded: function(promptPanel, isTimeout) {
+      _submitReportEnded: function(isTimeout) {
         // Clear submit-related control flags
         delete this.prompt.clicking;
-        if(promptPanel) { delete promptPanel.forceAutoSubmit; }
-        delete this.prompt.ignoreNextClickSubmit;
+
+        this.prompt.mode = 'USERINPUT';
 
         // Awaiting for update report response?
         if(this._updateReportTimeout >= 0) {
@@ -887,10 +812,10 @@ define([ 'common-ui/util/util','reportviewer/reportviewer-prompt', 'common-ui/ut
           [!isParentViewer ? 'addClass' : 'removeClass']('leafViewer'  );
       },
 
-      _buildReportContentOptions: function(promptPanel) {
+      _buildReportContentOptions: function() {
         var options = util.getUrlParameters();
 
-        $.extend(options, promptPanel.getParameterValues());
+        $.extend(options, this.prompt.api.operation.getParameterValues());
 
         options['renderMode'] = 'REPORT';
 
