@@ -723,7 +723,8 @@ define([ 'common-ui/util/util','reportviewer/reportviewer-prompt', 'common-ui/ut
         //  and must be done now so that the page controls have enough info.
         if(!promptPanel.getAutoSubmitSetting()) {
           // FETCH page-count info before rendering report
-          var callback = logged("_updateReportContent_fetchParameterCallback", function(newParamDefn) {
+          var callback = logged("_updateReportContent_fetchParameterCallback", function(xmlString) {
+            var newParamDefn = me.prompt.parseParameterDefinition(xmlString);
 
             delete promptPanel.forceAutoSubmit;
 
@@ -733,7 +734,7 @@ define([ 'common-ui/util/util','reportviewer/reportviewer-prompt', 'common-ui/ut
             me._updateReportContentCore(promptPanel, keyArgs);
           });
 
-          me.prompt.fetchParameterDefinition(promptPanel, callback, /*promptMode*/'MANUAL');
+          me.prompt.fetchParameterDefinition(callback, /*promptMode*/'MANUAL');
         } else {
           me._updateReportContentCore(promptPanel, keyArgs);
         }
